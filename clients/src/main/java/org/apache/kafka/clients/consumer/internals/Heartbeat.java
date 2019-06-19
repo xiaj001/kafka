@@ -24,6 +24,7 @@ import org.apache.kafka.common.utils.Timer;
  */
 public final class Heartbeat {
     private final int sessionTimeoutMs;
+    //发送心跳消息的时间间隔
     private final int heartbeatIntervalMs;
     private final int maxPollIntervalMs;
     private final long retryBackoffMs;
@@ -32,6 +33,7 @@ public final class Heartbeat {
     private final Timer sessionTimer;
     private final Timer pollTimer;
 
+    //最近发送心跳的时间
     private volatile long lastHeartbeatSend;
 
     public Heartbeat(Time time,

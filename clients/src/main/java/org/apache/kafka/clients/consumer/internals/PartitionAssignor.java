@@ -60,6 +60,7 @@ public interface PartitionAssignor {
 
 
     /**
+     * 每个消费者收到leader分配结果时的回调函数，此调用发生在 解析SyncGroupResponse 之后
      * Callback which is invoked when a group member receives its assignment from the leader.
      * @param assignment The local member's assignment as provided by the leader in {@link #assign(Cluster, Map)}
      */
@@ -101,6 +102,10 @@ public interface PartitionAssignor {
         }
     }
 
+    /**
+     * Assignment中保存了 分区分配的结果，partitions表示的是分配给某消费者的TopicPartition 集合
+     * userData是用户自定义的数据
+     */
     class Assignment {
         private final List<TopicPartition> partitions;
         private final ByteBuffer userData;

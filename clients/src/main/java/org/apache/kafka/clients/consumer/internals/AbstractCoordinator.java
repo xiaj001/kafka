@@ -105,13 +105,17 @@ public abstract class AbstractCoordinator implements Closeable {
     private final int sessionTimeoutMs;
     private final boolean leaveGroupOnClose;
     private final GroupCoordinatorMetrics sensors;
+    //心跳任务的辅助类
     private final Heartbeat heartbeat;
     protected final int rebalanceTimeoutMs;
+    //当前消费者所属的 consumer group 的id
     protected final String groupId;
+    //负责网络通信和执行定时任务
     protected final ConsumerNetworkClient client;
     protected final Time time;
     protected final long retryBackoffMs;
 
+    //负责定时发送心跳请求和心跳响应的处理
     private HeartbeatThread heartbeatThread = null;
 
     //是否需要重新加入消费组
@@ -121,6 +125,7 @@ public abstract class AbstractCoordinator implements Closeable {
     private boolean needsJoinPrepare = true;
     private MemberState state = MemberState.UNJOINED;
     private RequestFuture<ByteBuffer> joinFuture = null;
+    //记录服务端GroupCoordinator 所在的 Node 节点
     private Node coordinator = null;
     private Generation generation = Generation.NO_GENERATION;
 
@@ -583,13 +588,14 @@ public abstract class AbstractCoordinator implements Closeable {
     private RequestFuture<ByteBuffer> onJoinLeader(JoinGroupResponse joinResponse) {
         try {
             // perform the leader synchronization and send back the assignment for the group
+            //执行分区
             Map<String, ByteBuffer> groupAssignment = performAssignment(joinResponse.leaderId(), joinResponse.groupProtocol(),
                     joinResponse.members());
 
             SyncGroupRequest.Builder requestBuilder =
                     new SyncGroupRequest.Builder(groupId, generation.generationId, generation.memberId, groupAssignment);
             log.debug("Sending leader SyncGroup to coordinator {}: {}", this.coordinator, requestBuilder);
-            //注意这句代码 发送SyncGroup，得到自己所分配到的partition
+            //将分区结果发送给服务端 GroupCoordinator
             return sendSyncGroupRequest(requestBuilder);
         } catch (RuntimeException e) {
             return RequestFuture.failure(e);
@@ -951,6 +957,8 @@ public abstract class AbstractCoordinator implements Closeable {
     }
 
 
+    //在之前的版本中，HeartbeatTask是一个实现了DelayedTask 接口的定时任务
+    //现在改为 线程的方式，在 run() 方法里用 while 循环，结合变量shouldHeartbeat()的方式判断是否应该拉取
     private class HeartbeatThread extends KafkaThread {
         private boolean enabled = false;
         private boolean closed = false;
@@ -1093,6 +1101,11 @@ public abstract class AbstractCoordinator implements Closeable {
 
     }
 
+    /**
+     * 服务端GroupCoordinator 返回的年代信息，用来区分两次 rebalance 操作，
+     * 由于网络延迟等问题，在执行Rebalance 操作时可能收到上次 Rebalance过程中的请求，
+     * 为避免这种干扰，每次Rebalance 都会递增generation 的值
+     */
     protected static class Generation {
         public static final Generation NO_GENERATION = new Generation(
                 OffsetCommitRequest.DEFAULT_GENERATION_ID,
@@ -1100,6 +1113,7 @@ public abstract class AbstractCoordinator implements Closeable {
                 null);
 
         public final int generationId;
+        //服务端 GroupCoordinator 返回的分配给消费者的唯一id
         public final String memberId;
         public final String protocol;
 

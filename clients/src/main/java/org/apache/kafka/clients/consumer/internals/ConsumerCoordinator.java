@@ -69,14 +69,24 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class ConsumerCoordinator extends AbstractCoordinator {
     private final Logger log;
+
+    /**
+     * 在消费者发送的JoinGroupRequest 请求中，包含了消费者自身支持的 PartitionAssignor 信息
+     * 服务端GroupCoordinator从所有消费者都支持的分配策略中选择一个，通知leader使用此分配策略进行分区
+     * 此字段的值通过partition.assignment.strategy 参数配置，可以配置多个
+     */
     private final List<PartitionAssignor> assignors;
+
+    //记录了kafka集群的元数据
     private final Metadata metadata;
     private final ConsumerCoordinatorMetrics sensors;
     private final SubscriptionState subscriptions;
     private final OffsetCommitCallback defaultOffsetCommitCallback;
+    //是否开启了自动提交 offset
     private final boolean autoCommitEnabled;
     private final int autoCommitIntervalMs;
     private final ConsumerInterceptors<?, ?> interceptors;
+    //标志是否排除内部topic
     private final boolean excludeInternalTopics;
     private final AtomicInteger pendingAsyncCommits;
 
@@ -86,7 +96,9 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
     private boolean isLeader = false;
     private Set<String> joinedSubscription;
+    //用来存储Metadata 快照信息，主要用来检测topic是否发生了分区数量变化
     private MetadataSnapshot metadataSnapshot;
+    //存储metadata 快照信息，用来检测 partition 分配过程中，有没有发生分区数量的变化
     private MetadataSnapshot assignmentSnapshot;
     private Timer nextAutoCommitTimer;
 
@@ -162,6 +174,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
             this.nextAutoCommitTimer = time.timer(autoCommitIntervalMs);
 
         this.metadata.requestUpdate();
+        //为 metadata 添加监听器，当metadata 更新时做些事情
         addMetadataListener();
     }
 
@@ -194,6 +207,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
         // note we still need to update the topics contained in the metadata. Although we have
         // specified that all topics should be fetched, only those set explicitly will be retained
+        //更新 metadata 需要记录元数据的 topic 集合
         metadata.setTopics(subscriptions.groupSubscription());
     }
 
@@ -209,6 +223,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                 if (!cluster.invalidTopics().isEmpty())
                     throw new InvalidTopicException(cluster.invalidTopics());
 
+                //AUTO-PATTERN 模式的处理
                 if (subscriptions.hasPatternSubscription())
                     updatePatternSubscription(cluster);
 
@@ -243,6 +258,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         if (!isLeader)
             assignmentSnapshot = null;
 
+        //根据分区策略名称 获取 分区策略类
         PartitionAssignor assignor = lookupAssignor(assignmentStrategy);
         if (assignor == null)
             throw new IllegalStateException("Coordinator selected invalid assignment protocol: " + assignmentStrategy);
@@ -378,10 +394,18 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         return Math.min(nextAutoCommitTimer.remainingMs(), timeToNextHeartbeat(now));
     }
 
+    /**
+     * 执行分区
+     * @param leaderId The id of the leader (which is this member)
+     * @param assignmentStrategy
+     * @param allSubscriptions
+     * @return
+     */
     @Override
     protected Map<String, ByteBuffer> performAssignment(String leaderId,
                                                         String assignmentStrategy,
                                                         Map<String, ByteBuffer> allSubscriptions) {
+        //根据分区策略名称，获取分区策略类
         PartitionAssignor assignor = lookupAssignor(assignmentStrategy);
         if (assignor == null)
             throw new IllegalStateException("Coordinator selected invalid assignment protocol: " + assignmentStrategy);
@@ -407,6 +431,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
         log.debug("Performing assignment using strategy {} with subscriptions {}", assignor.name(), subscriptions);
 
+        //真正的调用分区方法，得到分区结果
         Map<String, Assignment> assignment = assignor.assign(metadata.fetch(), subscriptions);
 
         // user-customized assignor may have created some topics that are not in the subscription list
