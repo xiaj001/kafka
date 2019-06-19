@@ -497,14 +497,23 @@ public class NetworkClient implements KafkaClient {
             }
         }
         Send send = request.toSend(destination, header);
-        InFlightRequest inFlightRequest = new InFlightRequest(
-                clientRequest,
-                header,
-                isInternalRequest,
-                request,
-                send,
-                now);
+        InFlightRequest inFlightRequest = new InFlightRequest(clientRequest,header,isInternalRequest,request,send,now);
+
+        /**
+         *
+         * 为了保证服务端的处理性能，客户端网络连接对象有一个限制条件：针对同一个服务端，如果上
+         * 一个客户端请求还没有发送完成，则不允许发送新的客户端请求。客户端网络连接对象用
+         * inFlightRequests 变量在客户端缓存了还没有收到响应的客户端请求， InFlightRequests 类包含一个节
+         * 点到双端队列的映射结构。在准备发送客户端请求时，请求将添加到指定节点对应的队列中；在收到
+         * 响应后，才会将请求从队列中移除。
+         *
+         */
+
+
+        //还没开始真正发送，先加入队列
         this.inFlightRequests.add(inFlightRequest);
+
+        //发送的对象走客户端请求中的RequestSend
         selector.send(send);
     }
 
@@ -540,12 +549,15 @@ public class NetworkClient implements KafkaClient {
         // process completed actions
         long updatedNow = this.time.milliseconds();
         List<ClientResponse> responses = new ArrayList<>();
-        handleCompletedSends(responses, updatedNow);
-        handleCompletedReceives(responses, updatedNow);
-        handleDisconnections(responses, updatedNow);
-        handleConnections();
+
+        //客户端发送请求后会调用 handleCompletedSends() 处理已经完成的发送
+        //客户端接收到响应后会调用handleCompletedReceives() 处理已经完成的接收
+        handleCompletedSends(responses, updatedNow);        //完成发送的处理器
+        handleCompletedReceives(responses, updatedNow);     //完成接收的处理器
+        handleDisconnections(responses, updatedNow);        //断开连接的处理器
+        handleConnections();                                //处理连接的处理器
         handleInitiateApiVersionRequests(updatedNow);
-        handleTimedOutRequests(responses, updatedNow);
+        handleTimedOutRequests(responses, updatedNow);      //超时请求的处理器
         completeResponses(responses);
 
         return responses;

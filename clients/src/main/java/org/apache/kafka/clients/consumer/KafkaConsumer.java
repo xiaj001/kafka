@@ -557,15 +557,21 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
 
     private final Logger log;
     private final String clientId;
+    //消费协调者; 控制着 consumer 与服务端 GroupCoordinator 之间的通信逻辑
     private final ConsumerCoordinator coordinator;
     private final Deserializer<K> keyDeserializer;
     private final Deserializer<V> valueDeserializer;
+    //负责从服务端获取消息
     private final Fetcher<K, V> fetcher;
     private final ConsumerInterceptors<K, V> interceptors;
 
     private final Time time;
+
+    //负责消费者与kafka服务端的网络通信
     private final ConsumerNetworkClient client;
+    //维护了消费者的消费状态
     private final SubscriptionState subscriptions;
+    //记录了整个kafka集群的元信息
     private final Metadata metadata;
     private final long retryBackoffMs;
     private final long requestTimeoutMs;
@@ -842,6 +848,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     }
 
     /**
+     * 获取分区信息
      * Get the set of partitions currently assigned to this consumer. If subscription happened by directly assigning
      * partitions using {@link #assign(Collection)} then this will simply return the same partitions that
      * were assigned. If topic subscription was used, then this will give the set of topic partitions currently assigned
@@ -859,6 +866,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     }
 
     /**
+     * 获取订阅信息
      * Get the current subscription. Will return the same topics used in the most recent call to
      * {@link #subscribe(Collection, ConsumerRebalanceListener)}, or an empty set if no such call has been made.
      * @return The set of topics currently subscribed to
@@ -873,6 +881,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     }
 
     /**
+     * 订阅消息
      * Subscribe to the given list of topics to get dynamically
      * assigned partitions. <b>Topic subscriptions are not incremental. This list will replace the current
      * assignment (if there is one).</b> Note that it is not possible to combine topic subscription with group management
@@ -1018,6 +1027,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     }
 
     /**
+     * 取消订阅
      * Unsubscribe from topics currently subscribed with {@link #subscribe(Collection)} or {@link #subscribe(Pattern)}.
      * This also clears any partitions directly assigned through {@link #assign(Collection)}.
      */
@@ -1167,6 +1177,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     private ConsumerRecords<K, V> poll(final Timer timer, final boolean includeMetadataInTimeout) {
         acquireAndEnsureOpen();
         try {
+            //consumer 没有订阅任何topic 或者 被分配分区
             if (this.subscriptions.hasNoSubscriptionOrUserAssignment()) {
                 throw new IllegalStateException("Consumer is not subscribed to any topics or assigned any partitions");
             }
@@ -1180,11 +1191,14 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                         return ConsumerRecords.empty();
                     }
                 } else {
+                    //注意这句代码隐藏的较深
+                    //如果需要的话，更新分区信息(consumer启动，第一次调用 poll 方法的时候)
                     while (!updateAssignmentMetadataIfNeeded(time.timer(Long.MAX_VALUE))) {
                         log.warn("Still waiting for metadata");
                     }
                 }
 
+                //正真的拉取数据
                 final Map<TopicPartition, List<ConsumerRecord<K, V>>> records = pollForFetches(timer);
                 if (!records.isEmpty()) {
                     // before returning the fetched records, we can send off the next round of fetches
@@ -1219,6 +1233,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     }
 
     private Map<TopicPartition, List<ConsumerRecord<K, V>>> pollForFetches(Timer timer) {
+        //获取拉取消息的超时时间
         long pollTimeout = Math.min(coordinator.timeToNextPoll(timer.currentTimeMs()), timer.remainingMs());
 
         // if data is available already, return it immediately
@@ -1483,6 +1498,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     }
 
     /**
+     * 定位到分区的指定位置，更新拉取偏移量
      * Overrides the fetch offsets that the consumer will use on the next {@link #poll(Duration) poll(timeout)}. If this API
      * is invoked for the same partition more than once, the latest offset will be used on the next poll(). Note that
      * you may lose data if this API is arbitrarily used in the middle of consumption, to reset the fetch offsets
@@ -1558,6 +1574,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     }
 
     /**
+     * 设置分区的偏移量
      * Get the offset of the <i>next record</i> that will be fetched (if a record with that offset exists).
      * This method may issue a remote call to the server if there is no current position for the given partition.
      * <p>
@@ -1636,6 +1653,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     }
 
     /**
+     * 获取最后提交的偏移量
      * Get the last committed offset for the given partition (whether the commit happened by this process or
      * another). This offset will be used as the position for the consumer in the event of a failure.
      * <p>
@@ -1707,6 +1725,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     }
 
     /**
+     * 根据topic获取分区信息
      * Get metadata about the partitions for a given topic. This method will issue a remote call to the server if it
      * does not already have any metadata about the given topic.
      *

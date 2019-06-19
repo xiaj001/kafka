@@ -50,6 +50,7 @@ public class RequestFuture<T> implements ConsumerNetworkClient.PollCondition {
     private final CountDownLatch completedLatch = new CountDownLatch(1);
 
     /**
+     * 表示当前请求是否已经完成，不管正常完成还是出现异常，此方法都会返回 true
      * Check whether the response is ready to be handled
      * @return true if the response is ready, false otherwise
      */
@@ -191,6 +192,7 @@ public class RequestFuture<T> implements ConsumerNetworkClient.PollCondition {
     }
 
     /**
+     * 适配器模式，使 request future 从 一种类型(RequestFutureAdapter)转换成另一种类型(RequestFuture)
      * Convert from a request future of one type to another type
      * @param adapter The adapter which does the conversion
      * @param <S> The type of the future adapted to
@@ -212,6 +214,7 @@ public class RequestFuture<T> implements ConsumerNetworkClient.PollCondition {
         return adapted;
     }
 
+    //责任链模式
     public void chain(final RequestFuture<T> future) {
         addListener(new RequestFutureListener<T>() {
             @Override

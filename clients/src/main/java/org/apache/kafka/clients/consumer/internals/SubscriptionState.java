@@ -49,6 +49,9 @@ import java.util.regex.Pattern;
  *
  * Note that pause state as well as fetch/consumed positions are not preserved when partition
  * assignment is changed whether directly by the user or through a group rebalance.
+ *
+ * kafkaConsumer 从kafka 拉取消息时，发送的请求是FetchRequest，在其中需要指定消费者希望拉取的起始消息offset，
+ * 为了 拉取者快速获取这个值，KafkaConsumer 使用SubscriptionState来追踪TopicPartition与offset的对应关系
  */
 public class SubscriptionState {
     private static final String SUBSCRIPTION_EXCEPTION_MESSAGE =

@@ -57,13 +57,17 @@ public class ConsumerNetworkClient implements Closeable {
     // the mutable state of this class is protected by the object's monitor (excluding the wakeup
     // flag and the request completion queue below).
     private final Logger log;
+    //NetworkClient 对象
     private final KafkaClient client;
+    //缓冲队列，Map<Node, List<ClientRequest>> 类型，key 是node节点，value是发往此node的ClientRequest集合
     private final UnsentRequests unsent = new UnsentRequests();
     private final Metadata metadata;
     private final Time time;
     private final long retryBackoffMs;
     private final int maxPollTimeoutMs;
     private final int requestTimeoutMs;
+
+    //kafkaConsumer 是否正在执行不可中断的方法。每进入一个不可中断的方法，则加1退出不可中断方法，则减1
     private final AtomicBoolean wakeupDisabled = new AtomicBoolean();
 
     // We do not need high throughput, so use a fair lock to try to avoid starvation
@@ -77,6 +81,7 @@ public class ConsumerNetworkClient implements Closeable {
 
     // this flag allows the client to be safely woken up without waiting on the lock above. It is
     // atomic to avoid the need to acquire the lock above in order to enable it concurrently.
+    // 由调用KafkaConsumer对象的消费者线程之外的其它线程设置，表示要中断KafkaConsumer 线程
     private final AtomicBoolean wakeup = new AtomicBoolean(false);
 
     public ConsumerNetworkClient(LogContext logContext,
@@ -104,6 +109,7 @@ public class ConsumerNetworkClient implements Closeable {
     }
 
     /**
+     * send 方法并不真正发送 网络请求，而是将请求参数 放入 unsent 集合中
      * Send a new request. Note that the request is not actually transmitted on the
      * network until one of the {@link #poll(Timer)} variants is invoked. At this
      * point the request will either be transmitted successfully or will fail.
@@ -125,6 +131,7 @@ public class ConsumerNetworkClient implements Closeable {
         RequestFutureCompletionHandler completionHandler = new RequestFutureCompletionHandler();
         ClientRequest clientRequest = client.newClientRequest(node.idString(), requestBuilder, now, true,
                 requestTimeoutMs, completionHandler);
+        //创建ClientRequest 对象，并保存到 unsent 集合中
         unsent.put(node, clientRequest);
 
         // wakeup the client in case it is blocking in poll so that we can send the queued request
@@ -151,6 +158,8 @@ public class ConsumerNetworkClient implements Closeable {
     }
 
     /**
+     *
+     * 循环调用 poll 方法，直到MetaData 版本号增加，实现阻塞等待MetaData 更新
      * Block waiting on the metadata refresh with a timeout.
      *
      * @return true if update succeeded, false otherwise.
@@ -238,7 +247,7 @@ public class ConsumerNetworkClient implements Closeable {
 
     /**
      * Poll for any network IO.
-     * @param timer Timer bounding how long this method can block
+     * @param timer Timer bounding how long this method can block  执行poll方法的最长阻塞时间
      * @param pollCondition Nullable blocking condition
      * @param disableWakeup If TRUE disable triggering wake-ups
      */
@@ -252,6 +261,7 @@ public class ConsumerNetworkClient implements Closeable {
             handlePendingDisconnects();
 
             // send all the requests we can send now
+            // 循环处理 unsent 中缓存的请求，
             long pollDelayMs = trySend(timer.currentTimeMs());
 
             // check whether the poll is still needed by the caller. Note that if the expected completion
@@ -260,8 +270,12 @@ public class ConsumerNetworkClient implements Closeable {
             if (pendingCompletion.isEmpty() && (pollCondition == null || pollCondition.shouldBlock())) {
                 // if there are no requests in flight, do not block longer than the retry backoff
                 long pollTimeout = Math.min(timer.remainingMs(), pollDelayMs);
+
+                //计算超时时间
                 if (client.inFlightRequestCount() == 0)
                     pollTimeout = Math.min(pollTimeout, retryBackoffMs);
+
+                //将 KafkaChannel.send 字段指定的消息发送出去
                 client.poll(pollTimeout, timer.currentTimeMs());
             } else {
                 client.poll(0, timer.currentTimeMs());
@@ -305,6 +319,7 @@ public class ConsumerNetworkClient implements Closeable {
     }
 
     /**
+     * 等待unsent 和 InFlightRequest 中的请求全部完成(正常收到响应或出现异常)
      * Block until all pending requests from the given node have finished.
      * @param node The node to await requests from
      * @param timer Timer bounding how long this method can block
@@ -460,6 +475,14 @@ public class ConsumerNetworkClient implements Closeable {
         }
     }
 
+    /**
+     * 对每个 node 节点，循环遍历其对应的 ClientRequest 列表，
+     * 每次循环都调用NetworkClient 的ready() 方法，检测消费者与此节点之间的连接，以及发送请求的条件
+     * 若符合发送条件，则调用 NetworkClient 的 send() 方法，将请求放入InFlightRequests 队中等待响应
+     * 也放入 KafkaChannel 的send字段中等待发送，并将此消息从列表中删除
+     * @param now
+     * @return
+     */
     private long trySend(long now) {
         long pollDelayMs = maxPollTimeoutMs;
 
@@ -473,7 +496,7 @@ public class ConsumerNetworkClient implements Closeable {
                 ClientRequest request = iterator.next();
                 if (client.ready(node, now)) {
                     client.send(request, now);
-                    iterator.remove();
+                    iterator.remove();//从 unsent 集合中删除此请求
                 }
             }
         }
@@ -565,7 +588,7 @@ public class ConsumerNetworkClient implements Closeable {
                 future.raise(e);
             } else if (response.authenticationException() != null) {
                 future.raise(response.authenticationException());
-            } else if (response.wasDisconnected()) {
+            } else if (response.wasDisconnected()) {//因连接故障而产生的 ClientResponse 对象
                 log.debug("Cancelled request with header {} due to node {} being disconnected",
                         response.requestHeader(), response.destination());
                 future.raise(DisconnectException.INSTANCE);

@@ -305,13 +305,16 @@ public class Sender implements Runnable {
             }
         }
 
+        //将请求放入队列中并等待发送， 请求只能发送给准备好的节点
         long pollTimeout = sendProducerData(now);
+        //这里才会执行真正的网络读写请求， 比如将上面的客户端请求真正发送出去
         client.poll(pollTimeout, now);
     }
 
     private long sendProducerData(long now) {
         Cluster cluster = metadata.fetch();
         // get the list of partitions with data ready to send
+        //获取准备发送的所有分区
         RecordAccumulator.ReadyCheckResult result = this.accumulator.ready(cluster, now);
 
         // if there are any partitions whose leaders are not known yet, force metadata update
@@ -328,6 +331,7 @@ public class Sender implements Runnable {
         }
 
         // remove any nodes we aren't ready to send to
+        //建立到主副本节点的网络连接， 移除还没有准备好的节点
         Iterator<Node> iter = result.readyNodes.iterator();
         long notReadyTimeout = Long.MAX_VALUE;
         while (iter.hasNext()) {
@@ -339,6 +343,7 @@ public class Sender implements Runnable {
         }
 
         // create produce requests
+        //读取记录收集器，返回的每个主副本节点对应批记录列表,每个批记录对应一个分区
         Map<Integer, List<ProducerBatch>> batches = this.accumulator.drain(cluster, result.readyNodes, this.maxRequestSize, now);
         addToInflightBatches(batches);
         if (guaranteeMessageOrder) {

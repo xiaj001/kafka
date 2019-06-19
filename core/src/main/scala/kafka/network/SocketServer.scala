@@ -397,20 +397,24 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
    * Accept loop that checks for new connection attempts
    */
   def run() {
+    //将channel注册到selector上
     serverChannel.register(nioSelector, SelectionKey.OP_ACCEPT)
     startupComplete()
     try {
       var currentProcessor = 0
       while (isRunning) {
         try {
+          //这里进行堵塞接收,最多等500ms,如果ready返回的值是0表示还没有准备好,否则表示准备就绪.表示有通道已经被注册
           val ready = nioSelector.select(500)
           if (ready > 0) {
+            //这里得到已经准备好的网络通道的key的集合
             val keys = nioSelector.selectedKeys()
             val iter = keys.iterator()
             while (iter.hasNext && isRunning) {
               try {
                 val key = iter.next
                 iter.remove()
+                //如果selectkey已经注册到accept事件,通过accept函数与对应的线程Processor进行处理.这里表示这个socket的通道包含有一个client端的连接请求.
                 if (key.isAcceptable) {
                   val processor = synchronized {
                     currentProcessor = currentProcessor % processors.size
@@ -421,6 +425,7 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
                   throw new IllegalStateException("Unrecognized key state for acceptor thread.")
 
                 // round robin to the next processor thread, mod(numProcessors) will be done later
+                //每次接收一个socket请求后,用于处理的线程进行轮询到一个线程中处理.
                 currentProcessor = currentProcessor + 1
               } catch {
                 case e: Throwable => error("Error while accepting connection", e)
@@ -473,8 +478,10 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
    */
   def accept(key: SelectionKey, processor: Processor) {
     val serverSocketChannel = key.channel().asInstanceOf[ServerSocketChannel]
+    //得到请求的socket通道
     val socketChannel = serverSocketChannel.accept()
     try {
+      //这里检查当前的IP的连接数是否已经达到了最大的连接数,如果是,直接throw too many connect.
       connectionQuotas.inc(socketChannel.socket().getInetAddress)
       socketChannel.configureBlocking(false)
       socketChannel.socket().setTcpNoDelay(true)
@@ -486,7 +493,7 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
             .format(socketChannel.socket.getRemoteSocketAddress, socketChannel.socket.getLocalSocketAddress, processor.id,
                   socketChannel.socket.getSendBufferSize, sendBufferSize,
                   socketChannel.socket.getReceiveBufferSize, recvBufferSize))
-
+      //对应的processor处理socket通道
       processor.accept(socketChannel)
     } catch {
       case e: TooManyConnectionsException =>
@@ -609,6 +616,7 @@ private[kafka] class Processor(val id: Int,
       while (isRunning) {
         try {
           // setup any new connections that have been queued up
+          //这块是从队列中取一个连接，并注册到selector上。
           configureNewConnections()
           // register any new responses for writing
           processNewResponses()

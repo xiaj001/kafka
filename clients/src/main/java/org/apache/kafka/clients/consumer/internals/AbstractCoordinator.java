@@ -113,7 +113,11 @@ public abstract class AbstractCoordinator implements Closeable {
     protected final long retryBackoffMs;
 
     private HeartbeatThread heartbeatThread = null;
+
+    //是否需要重新加入消费组
     private boolean rejoinNeeded = true;
+
+    //准备加入消费组
     private boolean needsJoinPrepare = true;
     private MemberState state = MemberState.UNJOINED;
     private RequestFuture<ByteBuffer> joinFuture = null;
@@ -389,25 +393,34 @@ public abstract class AbstractCoordinator implements Closeable {
             // refresh which changes the matched subscription set) can occur while another rebalance is
             // still in progress.
             if (needsJoinPrepare) {
+                //准备加入
                 onJoinPrepare(generation.generationId, generation.memberId);
                 needsJoinPrepare = false;
             }
 
+            //发起 加入消费组 请求
             final RequestFuture<ByteBuffer> future = initiateJoinGroup();
+            //RequestFuture对象是对Future的封装
             client.poll(future, timer);
             if (!future.isDone()) {
                 // we ran out of time
                 return false;
             }
 
+            //如果加入成功
             if (future.succeeded()) {
                 // Duplicate the buffer in case `onJoinComplete` does not complete and needs to be retried.
                 ByteBuffer memberAssignment = future.value().duplicate();
+                //完成
                 onJoinComplete(generation.generationId, generation.memberId, generation.protocol, memberAssignment);
 
                 // We reset the join group future only after the completion callback returns. This ensures
                 // that if the callback is woken up, we will retry it on the next joinGroupIfNeeded.
                 resetJoinGroupFuture();
+
+                //发送请求前的准备阶段也使用了一个布尔变量needsJoinPrepare控制，初始时为true，
+                // 调用onJoinPrepare后设置为false ， 表示准备阶段已经完成。
+                // 调用onJoinComplete() 重置为true，为下次重新加入做准备
                 needsJoinPrepare = true;
             } else {
                 resetJoinGroupFuture();
@@ -440,6 +453,7 @@ public abstract class AbstractCoordinator implements Closeable {
             disableHeartbeatThread();
 
             state = MemberState.REBALANCING;
+            //发送JoinGroup(加入消费组)请求
             joinFuture = sendJoinGroupRequest();
             joinFuture.addListener(new RequestFutureListener<ByteBuffer>() {
                 @Override
@@ -497,6 +511,8 @@ public abstract class AbstractCoordinator implements Closeable {
         // maximum time that it may block on the coordinator. We add an extra 5 seconds for small delays.
 
         int joinGroupTimeoutMs = Math.max(rebalanceTimeoutMs, rebalanceTimeoutMs + 5000);
+
+        //注意这个JoinGroupResponseHandler，JoinGroup返回之后，发送SyncGroup，得到自己所分配到的partition
         return client.send(coordinator, requestBuilder, joinGroupTimeoutMs)
                 .compose(new JoinGroupResponseHandler());
     }
@@ -518,6 +534,7 @@ public abstract class AbstractCoordinator implements Closeable {
                         AbstractCoordinator.this.generation = new Generation(joinResponse.generationId(),
                                 joinResponse.memberId(), joinResponse.groupProtocol());
                         if (joinResponse.isLeader()) {
+                            //发送SyncGroup，得到自己所分配到的partition
                             onJoinLeader(joinResponse).chain(future);
                         } else {
                             onJoinFollower().chain(future);
@@ -572,6 +589,7 @@ public abstract class AbstractCoordinator implements Closeable {
             SyncGroupRequest.Builder requestBuilder =
                     new SyncGroupRequest.Builder(groupId, generation.generationId, generation.memberId, groupAssignment);
             log.debug("Sending leader SyncGroup to coordinator {}: {}", this.coordinator, requestBuilder);
+            //注意这句代码 发送SyncGroup，得到自己所分配到的partition
             return sendSyncGroupRequest(requestBuilder);
         } catch (RuntimeException e) {
             return RequestFuture.failure(e);
@@ -931,6 +949,7 @@ public abstract class AbstractCoordinator implements Closeable {
                 lastHeartbeat);
         }
     }
+
 
     private class HeartbeatThread extends KafkaThread {
         private boolean enabled = false;

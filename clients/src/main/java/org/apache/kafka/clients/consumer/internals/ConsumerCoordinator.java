@@ -239,6 +239,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                                   String assignmentStrategy,
                                   ByteBuffer assignmentBuffer) {
         // only the leader is responsible for monitoring for metadata changes (i.e. partition changes)
+        //如果不是leader
         if (!isLeader)
             assignmentSnapshot = null;
 
@@ -247,6 +248,8 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
             throw new IllegalStateException("Coordinator selected invalid assignment protocol: " + assignmentStrategy);
 
         Assignment assignment = ConsumerProtocol.deserializeAssignment(assignmentBuffer);
+
+        //更新状态
         subscriptions.assignFromSubscribed(assignment.partitions());
 
         // check if the assignment contains some topics that were not in the original
@@ -309,14 +312,17 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
     public boolean poll(Timer timer) {
         invokeCompletedOffsetCommitCallbacks();
 
+        //如果是自动分区
         if (subscriptions.partitionsAutoAssigned()) {
             // Always update the heartbeat last poll time so that the heartbeat thread does not leave the
             // group proactively due to application inactivity even if (say) the coordinator cannot be found.
             pollHeartbeat(timer.currentTimeMs());
+            //查找coordinator。如果没找到，就会一直阻塞在这里。
             if (coordinatorUnknown() && !ensureCoordinatorReady(timer)) {
                 return false;
             }
 
+            //找到coordinator之后，发送JoinGroup请求
             if (rejoinNeededOrPending()) {
                 // due to a race condition between the initial metadata fetch and the initial rebalance,
                 // we need to ensure that the metadata is fresh before joining initially. This ensures
@@ -338,6 +344,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                     }
                 }
 
+                //找到coordinator之后，发送JoinGroup请求 ensureActiveGroup()
                 if (!ensureActiveGroup(timer)) {
                     return false;
                 }
@@ -468,6 +475,10 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         subscriptions.resetGroupSubscription();
     }
 
+    /**
+     * 是否需要重新加入消费组 或者 等待
+     * @return
+     */
     @Override
     public boolean rejoinNeededOrPending() {
         if (!subscriptions.partitionsAutoAssigned())
