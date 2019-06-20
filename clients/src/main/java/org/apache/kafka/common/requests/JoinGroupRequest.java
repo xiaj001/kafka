@@ -83,6 +83,7 @@ public class JoinGroupRequest extends AbstractRequest {
 
     public static final String UNKNOWN_MEMBER_ID = "";
 
+    //消息体格式:group_id + session_timeout + member_id + protocol_type + group_protocols
     private final String groupId;
     private final int sessionTimeout;
     private final int rebalanceTimeout;

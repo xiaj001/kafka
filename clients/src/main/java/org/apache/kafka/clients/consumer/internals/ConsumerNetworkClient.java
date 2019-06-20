@@ -176,6 +176,7 @@ public class ConsumerNetworkClient implements Closeable {
     }
 
     /**
+     * 确认 metadata 是最新的
      * Ensure our metadata is fresh (if an update is expected, this will block
      * until it has completed).
      */

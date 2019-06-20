@@ -1225,6 +1225,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * Visible for testing
      */
     boolean updateAssignmentMetadataIfNeeded(final Timer timer) {
+        // 获取分区，如果需要重新执行分区，则执行
         if (!coordinator.poll(timer)) {
             return false;
         }

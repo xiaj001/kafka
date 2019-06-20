@@ -224,6 +224,7 @@ public abstract class AbstractCoordinator implements Closeable {
                                            ByteBuffer memberAssignment);
 
     /**
+     * 发送 GroupCoordinatorRequest 请求的入口
      * Visible for testing.
      *
      * Ensure that the coordinator is ready to receive requests.
@@ -236,7 +237,10 @@ public abstract class AbstractCoordinator implements Closeable {
             return true;
 
         do {
+            // 查找集群负载最低的 node 节点，并创建 GroupCoordinatorRequest 请求，
+            // 调用 client.send() 方法将请求放入unsent 队列中等待发送，并返回RequestFuture<Void>对象
             final RequestFuture<Void> future = lookupCoordinator();
+            //调用ConsumerNetworkClient的poll方法，将GroupCoordinatorRequest的请求发送出去，使用阻塞的发送
             client.poll(future, timer);
 
             if (!future.isDone()) {
@@ -247,12 +251,17 @@ public abstract class AbstractCoordinator implements Closeable {
             if (future.failed()) {
                 if (future.isRetriable()) {
                     log.debug("Coordinator discovery failed, refreshing metadata");
+                    //如果出现RetriableException 异常，则调用ConsumerNetworkClient的awaitMetadataUpdate方法
+                    // 阻塞更新Metadata中的集群元数据,然后继续循环执行
                     client.awaitMetadataUpdate(timer);
                 } else
+                    //如果不是RetriableException 异常，则直接报错
                     throw future.exception();
             } else if (coordinator != null && client.isUnavailable(coordinator)) {
                 // we found the coordinator, but the connection has failed, so mark
                 // it dead and backoff before retrying discovery
+                // 如果成功找到GroupCoordinator 节点，但是网络连接失败，则将其 unsent 中对应的请求清空
+                // 并且 coordinator 字段置为 null，sleep 一段时间后 继续循环执行
                 markCoordinatorUnknown();
                 timer.sleep(retryBackoffMs);
             }
@@ -264,11 +273,15 @@ public abstract class AbstractCoordinator implements Closeable {
     protected synchronized RequestFuture<Void> lookupCoordinator() {
         if (findCoordinatorFuture == null) {
             // find a node to ask about the coordinator
+            // 查找负载最低的节点，底层实现是查找InFlightRequests 中未确认请求最少的节点
             Node node = this.client.leastLoadedNode();
+
+            //找不到可用的节点，则直接返回 NoAvailableBrokersException 异常
             if (node == null) {
                 log.debug("No broker available to send FindCoordinator request");
                 return RequestFuture.noBrokersAvailable();
             } else
+                //创建GroupCoordinatorRequest请求 (ps:本版本中 GroupCoordinatorRequest 变成了 FindCoordinatorRequest)
                 findCoordinatorFuture = sendFindCoordinatorRequest(node);
         }
         return findCoordinatorFuture;
@@ -398,7 +411,10 @@ public abstract class AbstractCoordinator implements Closeable {
             // refresh which changes the matched subscription set) can occur while another rebalance is
             // still in progress.
             if (needsJoinPrepare) {
-                //准备加入
+                //准备加入:做了3件事
+                // 1.如果开启了自动提交offset，则进行同步提交offset
+                // 2.调用注册在 SubscriptionState 中的ConsumerRebalanceListener上的回调方法
+                // 3.将SubscriptionState的 needPartitionAssignment字段设置为true并收缩groupSubscription 集合
                 onJoinPrepare(generation.generationId, generation.memberId);
                 needsJoinPrepare = false;
             }
@@ -416,7 +432,7 @@ public abstract class AbstractCoordinator implements Closeable {
             if (future.succeeded()) {
                 // Duplicate the buffer in case `onJoinComplete` does not complete and needs to be retried.
                 ByteBuffer memberAssignment = future.value().duplicate();
-                //完成
+                //完成,此时已经拿到了分区结果
                 onJoinComplete(generation.generationId, generation.memberId, generation.protocol, memberAssignment);
 
                 // We reset the join group future only after the completion callback returns. This ensures
@@ -468,6 +484,7 @@ public abstract class AbstractCoordinator implements Closeable {
                     synchronized (AbstractCoordinator.this) {
                         log.info("Successfully joined group with generation {}", generation.generationId);
                         state = MemberState.STABLE;
+                        // 将rejoinNeeded置为false，下次不需要执行分区
                         rejoinNeeded = false;
 
                         if (heartbeatThread != null)
@@ -538,6 +555,7 @@ public abstract class AbstractCoordinator implements Closeable {
                     } else {
                         AbstractCoordinator.this.generation = new Generation(joinResponse.generationId(),
                                 joinResponse.memberId(), joinResponse.groupProtocol());
+                        //消费者根据leaderId判断自己是不是leader
                         if (joinResponse.isLeader()) {
                             //发送SyncGroup，得到自己所分配到的partition
                             onJoinLeader(joinResponse).chain(future);
@@ -616,8 +634,10 @@ public abstract class AbstractCoordinator implements Closeable {
             Errors error = syncResponse.error();
             if (error == Errors.NONE) {
                 sensors.syncLatency.record(response.requestLatencyMs());
+                // 调用RequestFuture.complete() 方法传播分区分配结果
                 future.complete(syncResponse.memberAssignment());
             } else {
+                //将 rejoinNeeded 设置为true
                 requestRejoin();
 
                 if (error == Errors.GROUP_AUTHORIZATION_FAILED) {
@@ -653,6 +673,7 @@ public abstract class AbstractCoordinator implements Closeable {
         FindCoordinatorRequest.Builder requestBuilder =
                 new FindCoordinatorRequest.Builder(FindCoordinatorRequest.CoordinatorType.GROUP, this.groupId);
         return client.send(node, requestBuilder)
+                //注意 FindCoordinatorResponseHandler 里面是处理服务端响应数据的入口
                      .compose(new FindCoordinatorResponseHandler());
     }
 
@@ -671,6 +692,7 @@ public abstract class AbstractCoordinator implements Closeable {
                     // for the coordinator in the underlying network client layer
                     int coordinatorConnectionId = Integer.MAX_VALUE - findCoordinatorResponse.node().id();
 
+                    //将响应结果封装成Node节点，赋值给coordinator
                     AbstractCoordinator.this.coordinator = new Node(
                             coordinatorConnectionId,
                             findCoordinatorResponse.node().host(),
@@ -710,6 +732,8 @@ public abstract class AbstractCoordinator implements Closeable {
      * @return the current coordinator or null if it is unknown
      */
     protected synchronized Node checkAndGetCoordinator() {
+        // 检测 coordinator 字段是否为空
+        // 检测 与 GroupCoordinator 之间的网络连接是否正常
         if (coordinator != null && client.isUnavailable(coordinator)) {
             markCoordinatorUnknown(true);
             return null;
@@ -811,6 +835,7 @@ public abstract class AbstractCoordinator implements Closeable {
             client.pollNoWakeup();
         }
 
+        //重置 rejoinNeeded ，下次调用poll()方法时，重新执行分区
         resetGeneration();
     }
 
@@ -831,8 +856,11 @@ public abstract class AbstractCoordinator implements Closeable {
     // visible for testing
     synchronized RequestFuture<Void> sendHeartbeatRequest() {
         log.debug("Sending Heartbeat request to coordinator {}", coordinator);
+        //创建heartbeatRequest
         HeartbeatRequest.Builder requestBuilder =
                 new HeartbeatRequest.Builder(this.groupId, this.generation.generationId, this.generation.memberId);
+
+        //使用HeartbeatResponseHandler对RequestFuture<ClientResponse>进行适配
         return client.send(coordinator, requestBuilder)
                 .compose(new HeartbeatResponseHandler());
     }
@@ -841,18 +869,23 @@ public abstract class AbstractCoordinator implements Closeable {
         @Override
         public void handle(HeartbeatResponse heartbeatResponse, RequestFuture<Void> future) {
             sensors.heartbeatLatency.record(response.requestLatencyMs());
+            //判断HeartbeatResponse中是否包含错误码，
             Errors error = heartbeatResponse.error();
             if (error == Errors.NONE) {
                 log.debug("Received successful Heartbeat response");
                 future.complete(null);
             } else if (error == Errors.COORDINATOR_NOT_AVAILABLE
                     || error == Errors.NOT_COORDINATOR) {
+                //如果找不到服务端对应的 GroupCoordinator
                 log.info("Attempt to heartbeat failed since coordinator {} is either not started or not valid.",
                         coordinator());
+                //将GroupCoordinator 设置为 未知
                 markCoordinatorUnknown();
+                //调用 raise() 设置对应的异常
                 future.raise(error);
             } else if (error == Errors.REBALANCE_IN_PROGRESS) {
                 log.info("Attempt to heartbeat failed since group is rebalancing");
+                //正在 Rebalance ，重新发起 加入组请求
                 requestRejoin();
                 future.raise(Errors.REBALANCE_IN_PROGRESS);
             } else if (error == Errors.ILLEGAL_GENERATION) {
@@ -871,9 +904,16 @@ public abstract class AbstractCoordinator implements Closeable {
         }
     }
 
+    /**
+     * 模板方法的设计模式，由父类模板方法定义操作流程，
+     * 由子类根据需求个性化实现流程中的抽象方法
+     * @param <R>
+     * @param <T>
+     */
     protected abstract class CoordinatorResponseHandler<R, T> extends RequestFutureAdapter<ClientResponse, T> {
         protected ClientResponse response;
 
+        //解析并处理response
         public abstract void handle(R response, RequestFuture<T> future);
 
         @Override
@@ -1031,6 +1071,7 @@ public abstract class AbstractCoordinator implements Closeable {
                         } else if (heartbeat.sessionTimeoutExpired(now)) {
                             // the session timeout has expired without seeing a successful heartbeat, so we should
                             // probably make sure the coordinator is still healthy.
+                            //上次心跳响应超时，将GroupCoordinator标记为宕机
                             markCoordinatorUnknown();
                         } else if (heartbeat.pollTimeoutExpired(now)) {
                             // the poll timeout has expired, which means that the foreground thread has stalled
@@ -1045,10 +1086,13 @@ public abstract class AbstractCoordinator implements Closeable {
                         } else if (!heartbeat.shouldHeartbeat(now)) {
                             // poll again after waiting for the retry backoff in case the heartbeat failed or the
                             // coordinator disconnected
+                            //如果没有到发送心跳的时间，wait()到超时
                             AbstractCoordinator.this.wait(retryBackoffMs);
                         } else {
+                            //更新发送 heartbeat 的时间
                             heartbeat.sentHeartbeat(now);
 
+                            //创建并缓存heartbeatRequest，添加监听器
                             sendHeartbeatRequest().addListener(new RequestFutureListener<Void>() {
                                 @Override
                                 public void onSuccess(Void value) {
