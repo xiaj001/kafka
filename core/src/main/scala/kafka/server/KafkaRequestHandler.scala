@@ -31,6 +31,8 @@ import scala.collection.mutable
 
 /**
  * A thread that answers kafka requests.
+  * KafkaRequestHandler 的主要职责是从 RequestChannel中获取请求，
+  * 并调用KafkaApis.handle() 方法处理请求
  */
 class KafkaRequestHandler(id: Int,
                           brokerId: Int,
@@ -51,9 +53,11 @@ class KafkaRequestHandler(id: Int,
       // time should be discounted by # threads.
       val startSelectTime = time.nanoseconds
 
+      // 从RequestChannel.requestQueue获取请求，通过requestQueue.poll() 方法实现
       val req = requestChannel.receiveRequest(300)
       val endTime = time.nanoseconds
       val idleTime = endTime - startSelectTime
+      // 统计监控指标
       aggregateIdleMeter.mark(idleTime / totalHandlerThreads.get)
 
       req match {
@@ -66,6 +70,9 @@ class KafkaRequestHandler(id: Int,
           try {
             request.requestDequeueTimeNanos = endTime
             trace(s"Kafka request handler $id on broker $brokerId handling request $request")
+
+            //KafkaApis类中实现了处理请求的逻辑，KafkaApis 还负责将响应
+            // 写回到对应的RequestChannel.responseQueue中，唤醒Processor处理
             apis.handle(request)
           } catch {
             case e: FatalExitError =>
@@ -92,6 +99,15 @@ class KafkaRequestHandler(id: Int,
 
 }
 
+/**
+  * API层使用KafkaRequestHandlerPool来管理所有的KafkaRequestHandler 线程，
+  * 它是一个简易版的线程池，其中创建了多个KafkaRequestHandler线程
+  * @param brokerId
+  * @param requestChannel
+  * @param apis
+  * @param time
+  * @param numThreads
+  */
 class KafkaRequestHandlerPool(val brokerId: Int,
                               val requestChannel: RequestChannel,
                               val apis: KafkaApis,
@@ -103,16 +119,22 @@ class KafkaRequestHandlerPool(val brokerId: Int,
   private val aggregateIdleMeter = newMeter("RequestHandlerAvgIdlePercent", "percent", TimeUnit.NANOSECONDS)
 
   this.logIdent = "[Kafka Request Handler on Broker " + brokerId + "], "
+
+  //用于保存执行KafkaRequestHandler的线程
   val runnables = new mutable.ArrayBuffer[KafkaRequestHandler](numThreads)
+
+  //创建KafkaRequestHandler线程
   for (i <- 0 until numThreads) {
     createHandler(i)
   }
 
+  // 创建并启动 KafkaRequestHandler 线程
   def createHandler(id: Int): Unit = synchronized {
     runnables += new KafkaRequestHandler(id, brokerId, aggregateIdleMeter, threadPoolSize, requestChannel, apis, time)
     KafkaThread.daemon("kafka-request-handler-" + id, runnables(id)).start()
   }
 
+  //重新设置线程池大小
   def resizeThreadPool(newSize: Int): Unit = synchronized {
     val currentSize = threadPoolSize.get
     info(s"Resizing request handler thread pool size from $currentSize to $newSize")

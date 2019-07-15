@@ -67,6 +67,9 @@ import scala.util.{Failure, Success, Try}
 
 /**
  * Logic to handle the various Kafka requests
+  * KafkaApis是Kafka服务器请求的入口类，它负责将KafkaRequestHandler传递过来的请求
+  * 分发到不同的handl*()处理方法中，分发的依据是RequestChannel.Request中的requestId
+  * 此字段保存了请求的ApiKeys的值，不同的ApiKeys值表示不同的请求类型。
  */
 class KafkaApis(val requestChannel: RequestChannel,
                 val replicaManager: ReplicaManager,
@@ -102,6 +105,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     try {
       trace(s"Handling request:${request.requestDesc(true)} from connection ${request.context.connectionId};" +
         s"securityProtocol:${request.context.securityProtocol},principal:${request.context.principal}")
+      //分发请求
       request.header.apiKey match {
         case ApiKeys.PRODUCE => handleProduceRequest(request)
         case ApiKeys.FETCH => handleFetchRequest(request)
