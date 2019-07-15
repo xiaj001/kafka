@@ -58,6 +58,7 @@ import scala.util.control.ControlThrowable
  */
 class SocketServer(val config: KafkaConfig, val metrics: Metrics, val time: Time, val credentialProvider: CredentialProvider) extends Logging with KafkaMetricsGroup {
 
+  // 在RequestChannel的requestQueue中缓存的最大请求个数
   private val maxQueuedRequests = config.queuedMaxRequests
 
   private val logContext = new LogContext(s"[SocketServer brokerId=${config.brokerId}] ")
@@ -68,11 +69,18 @@ class SocketServer(val config: KafkaConfig, val metrics: Metrics, val time: Time
   private val memoryPoolDepletedTimeMetricName = metrics.metricName("MemoryPoolDepletedTimeTotal", "socket-server-metrics")
   memoryPoolSensor.add(new Meter(TimeUnit.MILLISECONDS, memoryPoolDepletedPercentMetricName, memoryPoolDepletedTimeMetricName))
   private val memoryPool = if (config.queuedMaxBytes > 0) new SimpleMemoryPool(config.queuedMaxBytes, config.socketRequestMaxBytes, false, memoryPoolSensor) else MemoryPool.NONE
+
+  // Processor线程与Handler线程之间交换数据的队列
   val requestChannel = new RequestChannel(maxQueuedRequests)
+
+  // 此集合包含所有Endpoint对应的Processors线程
   private val processors = new ConcurrentHashMap[Int, Processor]()
   private var nextProcessorId = 0
 
+  //每个EndPoint对应一个Acceptor对象。每个网卡一个 EndPoint 。
   private[network] val acceptors = new ConcurrentHashMap[EndPoint, Acceptor]()
+
+  //在ConnectionQuotas中，提供了每个IP上的最大连接数的功能，底层通过一个Map对象，记录每个IP地址上建立的连接数。
   private var connectionQuotas: ConnectionQuotas = _
   private var stoppedProcessingRequests = false
 
@@ -91,6 +99,7 @@ class SocketServer(val config: KafkaConfig, val metrics: Metrics, val time: Time
   def startup(startupProcessors: Boolean = true) {
     this.synchronized {
       connectionQuotas = new ConnectionQuotas(config.maxConnectionsPerIp, config.maxConnectionsPerIpOverrides)
+      // 初始化时会遍历所有的Endpoint，创建与其对应的 Acceptor和Processor集合
       createAcceptorAndProcessors(config.numNetworkThreads, config.listeners)
       if (startupProcessors) {
         startProcessors()
@@ -159,9 +168,14 @@ class SocketServer(val config: KafkaConfig, val metrics: Metrics, val time: Time
       val listenerName = endpoint.listenerName
       val securityProtocol = endpoint.securityProtocol
 
+      //创建Acceptor并添加到 acceptors集合
       val acceptor = new Acceptor(endpoint, sendBufferSize, recvBufferSize, brokerId, connectionQuotas)
       addProcessors(acceptor, endpoint, processorsPerListener)
+
+      //创建 acceptor 对应的线程，并启动
       KafkaThread.nonDaemon(s"kafka-socket-acceptor-$listenerName-$securityProtocol-${endpoint.port}", acceptor).start()
+
+      //主线程阻塞等待Acceptor线程启动完毕
       acceptor.awaitStartup()
       acceptors.put(endpoint, acceptor)
     }
@@ -173,12 +187,16 @@ class SocketServer(val config: KafkaConfig, val metrics: Metrics, val time: Time
     val listenerProcessors = new ArrayBuffer[Processor]()
 
     for (_ <- 0 until newProcessorsPerListener) {
+      //创建Processor
       val processor = newProcessor(nextProcessorId, connectionQuotas, listenerName, securityProtocol, memoryPool)
       listenerProcessors += processor
+      //向requestChannel中添加一个监听器，此监听器的功能是:当Handler线程向
+      // 某个responseQueue中写入数据时，会唤醒对应的Processor线程进行处理
       requestChannel.addProcessor(processor)
       nextProcessorId += 1
     }
     listenerProcessors.foreach(p => processors.put(p.id, p))
+    //启动Processor线程
     acceptor.addProcessors(listenerProcessors)
   }
 
@@ -188,7 +206,9 @@ class SocketServer(val config: KafkaConfig, val metrics: Metrics, val time: Time
   def stopProcessingRequests() = {
     info("Stopping socket server request processors")
     this.synchronized {
+      //调用所有 Acceptor 的shutdown()
       acceptors.asScala.values.foreach(_.shutdown())
+      //调用所有 Processor 的shutdown()
       processors.asScala.values.foreach(_.shutdown())
       requestChannel.clear()
       stoppedProcessingRequests = true
@@ -212,6 +232,7 @@ class SocketServer(val config: KafkaConfig, val metrics: Metrics, val time: Time
     */
   def shutdown() = {
     info("Shutting down socket server")
+    //同步处理
     this.synchronized {
       if (!stoppedProcessingRequests)
         stopProcessingRequests()
@@ -286,13 +307,16 @@ class SocketServer(val config: KafkaConfig, val metrics: Metrics, val time: Time
  */
 private[kafka] abstract class AbstractServerThread(connectionQuotas: ConnectionQuotas) extends Runnable with Logging {
 
+  //标识当前线程的startup操作是否完成
   private val startupLatch = new CountDownLatch(1)
 
   // `shutdown()` is invoked before `startupComplete` and `shutdownComplete` if an exception is thrown in the constructor
   // (e.g. if the address is already in use). We want `shutdown` to proceed in such cases, so we first assign an open
   // latch and then replace it in `startupComplete()`.
+  // 标识当前线程的shutdown操作是否完成
   @volatile private var shutdownLatch = new CountDownLatch(0)
 
+  // 标识当前线程是否存活，在初始化时设置为true，在shutdown() 方法中会将 alive 设置为false
   private val alive = new AtomicBoolean(true)
 
   def wakeup(): Unit
@@ -345,6 +369,7 @@ private[kafka] abstract class AbstractServerThread(connectionQuotas: ConnectionQ
 
 /**
  * Thread that accepts and configures new connections. There is one of these per endpoint.
+ * 主要功能是:接收客户端创建连接的请求，创建socket连接并分配给 Processor处理
  */
 private[kafka] class Acceptor(val endPoint: EndPoint,
                               val sendBufferSize: Int,
@@ -370,6 +395,7 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
   }
 
   private def startProcessors(processors: Seq[Processor]): Unit = synchronized {
+    //为其对应的每一个Processor都创建对应的线程启动
     processors.foreach { processor =>
       KafkaThread.nonDaemon(s"kafka-network-thread-$brokerId-${endPoint.listenerName}-${endPoint.securityProtocol}-${processor.id}",
         processor).start()
@@ -395,6 +421,7 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
 
   /**
    * Accept loop that checks for new connection attempts
+   * 完成了对 OP_ACCEPT 事件的处理
    */
   def run() {
     //将channel注册到selector上
@@ -420,8 +447,9 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
                     currentProcessor = currentProcessor % processors.size
                     processors(currentProcessor)
                   }
+                  //处理OP_ACCEPT事件
                   accept(key, processor)
-                } else
+                } else //如果不是OP_ACCEPT事件，则报错
                   throw new IllegalStateException("Unrecognized key state for acceptor thread.")
 
                 // round robin to the next processor thread, mod(numProcessors) will be done later
@@ -519,6 +547,9 @@ private[kafka] object Processor {
 /**
  * Thread that processes all requests from a single connection. There are N of these running in parallel
  * each of which has its own selector
+*  Processor 主要用于完成读取请求和写回响应的操作，Processor不参与具体业务逻辑的处理。
+*
+*
  */
 private[kafka] class Processor(val id: Int,
                                time: Time,
@@ -551,7 +582,10 @@ private[kafka] class Processor(val id: Int,
     override def toString: String = s"$localHost:$localPort-$remoteHost:$remotePort-$index"
   }
 
+  //保存了由此Processor处理的新建SocketChannel
   private val newConnections = new ConcurrentLinkedQueue[SocketChannel]()
+
+  //保存未发送的响应
   private val inflightResponses = mutable.Map[String, RequestChannel.Response]()
   private val responseQueue = new LinkedBlockingDeque[RequestChannel.Response]()
 
@@ -576,6 +610,7 @@ private[kafka] class Processor(val id: Int,
   private val expiredConnectionsKilledCountMetricName = metrics.metricName("expired-connections-killed-count", "socket-server-metrics", metricTags)
   metrics.addMetric(expiredConnectionsKilledCountMetricName, expiredConnectionsKilledCount)
 
+  // KSelector 类型，负责管理网络连接。
   private val selector = createSelector(
     ChannelBuilders.serverChannelBuilder(listenerName,
       listenerName == config.interBrokerListenerName,
@@ -620,9 +655,13 @@ private[kafka] class Processor(val id: Int,
           configureNewConnections()
           // register any new responses for writing
           processNewResponses()
+          //读取请求，发送响应
           poll()
+          // 处理KSelector.completedReceives队列
           processCompletedReceives()
+          // 处理KSelector.completeSends 队列
           processCompletedSends()
+          // 处理KSelector.disconnected 队列
           processDisconnected()
         } catch {
           // We catch all the throwables here to prevent the processor thread from exiting. We do this because
@@ -656,13 +695,18 @@ private[kafka] class Processor(val id: Int,
     processException(errorMessage, throwable)
   }
 
+  /**
+    * 获取RequestChannel中对应的responseQueue队列，并处理其中缓存的response
+    *
+    */
   private def processNewResponses() {
     var currentResponse: RequestChannel.Response = null
     while ({currentResponse = dequeueResponse(); currentResponse != null}) {
+      //在requestChannel中使用Processor的ID绑定与responseQueue的对应关系
       val channelId = currentResponse.request.context.connectionId
       try {
         currentResponse match {
-          case response: NoOpResponse =>
+          case response: NoOpResponse =>  //没有响应需要发送给客户端
             // There is no response to send to the client, we need to read more pipelined requests
             // that are sitting in the server's socket buffer
             updateRequestMetrics(response)
@@ -673,7 +717,8 @@ private[kafka] class Processor(val id: Int,
             handleChannelMuteEvent(channelId, ChannelMuteEvent.RESPONSE_SENT)
             tryUnmuteChannel(channelId)
 
-          case response: SendResponse =>
+          case response: SendResponse => // 该响应需要发送给客户端
+            // 调用KSelector.send()方法，并将响应放入inflightResponse队列缓存
             sendResponse(response, response.responseSend)
           case response: CloseConnectionResponse =>
             updateRequestMetrics(response)
@@ -831,6 +876,8 @@ private[kafka] class Processor(val id: Int,
 
   /**
    * Queue up a new connection for reading
+   * Processor.accept() 方法接收到一个新的 SocketChannel 时会先将其放到 newConnections 队列
+   * 然后会唤醒Processor线程来处理newConnections队列。
    */
   def accept(socketChannel: SocketChannel) {
     newConnections.add(socketChannel)
