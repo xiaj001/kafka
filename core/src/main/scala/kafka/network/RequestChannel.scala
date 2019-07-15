@@ -88,6 +88,7 @@ object RequestChannel extends Logging {
     val session = Session(context.principal, context.clientAddress)
     private val bodyAndSize: RequestAndSize = context.parseRequest(buffer)
 
+    //请求头
     def header: RequestHeader = context.header
     def sizeOfBodyInBytes: Int = bodyAndSize.size
 
@@ -100,6 +101,7 @@ object RequestChannel extends Logging {
 
     def requestDesc(details: Boolean): String = s"$header -- ${body[AbstractRequest].toString(details)}"
 
+    // 请求体
     def body[T <: AbstractRequest](implicit classTag: ClassTag[T], nn: NotNothing[T]): T = {
       bodyAndSize.request match {
         case r: T => r
@@ -275,6 +277,7 @@ object RequestChannel extends Logging {
 class RequestChannel(val queueSize: Int) extends KafkaMetricsGroup {
   import RequestChannel._
   val metrics = new RequestChannel.Metrics
+  // Processor线程向Handler线程传递请求的队列。
   private val requestQueue = new ArrayBlockingQueue[BaseRequest](queueSize)
   private val processors = new ConcurrentHashMap[Int, Processor]()
 
