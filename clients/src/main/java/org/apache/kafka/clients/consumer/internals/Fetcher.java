@@ -112,17 +112,42 @@ public class Fetcher<K, V> implements SubscriptionState.Listener, Closeable {
     private final LogContext logContext;
     private final ConsumerNetworkClient client;
     private final Time time;
+
+    /**
+     * 在服务端收到FetchRequest之后并不是立即响应，而是当可返回的消息数据累加到minBytes个字节时才进行响应。
+     * 这样每个FetchResponse中就包含多条消息，提高网络的有效负载
+     *
+     */
     private final int minBytes;
     private final int maxBytes;
+
+    /**
+     * 等待FetchResponse的最长时间，服务端根据此时间决定何时进行响应
+     */
     private final int maxWaitMs;
+    /**
+     * 每次fetch操作的最大字节数
+     */
     private final int fetchSize;
     private final long retryBackoffMs;
     private final long requestTimeoutMs;
+    /**
+     * 每次获取record的最大数量
+     */
     private final int maxPollRecords;
     private final boolean checkCrcs;
+    /**
+     * 记录了kafka集群的元数据
+     */
     private final Metadata metadata;
     private final FetchManagerMetrics sensors;
+    /**
+     * 记录每个TopicPartition的消费情况
+     */
     private final SubscriptionState subscriptions;
+    /**
+     * List<CompletedFetch>类型，每个FetchResponse首先会转换成CompletedFetch对象进入此队列缓存，此时并未解析消息
+     */
     private final ConcurrentLinkedQueue<CompletedFetch> completedFetches;
     private final BufferSupplier decompressionBufferSupplier = BufferSupplier.create();
     private final Deserializer<K> keyDeserializer;
@@ -131,6 +156,12 @@ public class Fetcher<K, V> implements SubscriptionState.Listener, Closeable {
     private final Map<Integer, FetchSessionHandler> sessionHandlers;
     private final AtomicReference<RuntimeException> cachedListOffsetsException = new AtomicReference<>();
 
+    /**
+     * PartitionRecords保存了CompletedFetch解析后的结果集合，
+     * 其中有三个字段，records是消息集合，
+     * fetchOffset记录了records中第一个消息的offset，
+     * partition记录了消息对应的TopicPartition
+     */
     private PartitionRecords nextInLineRecords = null;
 
     public Fetcher(LogContext logContext,
@@ -861,15 +892,20 @@ public class Fetcher<K, V> implements SubscriptionState.Listener, Closeable {
     }
 
     /**
+     * 给获取的分区节点创建FetchRequest
      * Create fetch requests for all nodes for which we have assigned partitions
      * that have no existing requests in flight.
      */
     private Map<Node, FetchSessionHandler.FetchRequestData> prepareFetchRequests() {
+        //获取kafka集群元信息
         Cluster cluster = metadata.fetch();
         Map<Node, FetchSessionHandler.Builder> fetchable = new LinkedHashMap<>();
+
         for (TopicPartition partition : fetchablePartitions()) {
+            // 查找分区的leader副本所在的node
             Node node = cluster.leaderFor(partition);
             if (node == null) {
+                //找不到leader副本则准备更新metadata
                 metadata.requestUpdate();
             } else if (client.isUnavailable(node)) {
                 client.maybeThrowAuthFailure(node);
@@ -877,7 +913,7 @@ public class Fetcher<K, V> implements SubscriptionState.Listener, Closeable {
                 // If we try to send during the reconnect blackout window, then the request is just
                 // going to be failed anyway before being sent, so skip the send for now
                 log.trace("Skipping fetch for partition {} because node {} is awaiting reconnect backoff", partition, node);
-            } else if (client.hasPendingRequests(node)) {
+            } else if (client.hasPendingRequests(node)) {//是否还有pending请求
                 log.trace("Skipping fetch for partition {} because there is an in-flight request to {}", partition, node);
             } else {
                 // if there is a leader and no in-flight requests, issue a new fetch
@@ -893,6 +929,7 @@ public class Fetcher<K, V> implements SubscriptionState.Listener, Closeable {
                 }
 
                 long position = this.subscriptions.position(partition);
+                //记录每个分区对应的position，即要fetch的消息的offset
                 builder.add(partition, new FetchRequest.PartitionData(position, FetchRequest.INVALID_LOG_START_OFFSET,
                     this.fetchSize, Optional.empty()));
 
