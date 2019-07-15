@@ -42,6 +42,11 @@ import java.util.Iterator;
  * decompression and should therefore be used with caution.
  *
  * See {@link MemoryRecords} for the in-memory representation and {@link FileRecords} for the on-disk representation.
+ *
+ *
+ * 该类 在之前的版本的 类名为 MessageSet，它保存的数据格式分为 三部分 :
+ * 8 字节的offset值，4 字节的size表示message data 大小，这两部分组合成为LogOverhead
+ * message data 部分保存了消息的数据，逻辑上对应一个 Record 对象。
  */
 public interface Records extends BaseRecords {
     int OFFSET_OFFSET = 0;
@@ -57,6 +62,7 @@ public interface Records extends BaseRecords {
     int HEADER_SIZE_UP_TO_MAGIC = MAGIC_OFFSET + MAGIC_LENGTH;
 
     /**
+     * 将当前 Records 中的消息写入到channel中
      * Attempts to write the contents of this buffer to a channel.
      * @param channel The channel to write to
      * @param position The position in the buffer to write from

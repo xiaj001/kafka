@@ -37,19 +37,30 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
+ * 该类与之前版本中的 FileMessageSet 类作用相同
  * A {@link Records} implementation backed by a file. An optional start and end position can be applied to this
  * instance to enable slicing a range of the log records.
  */
 public class FileRecords extends AbstractRecords implements Closeable {
+
+    // 表示当前FileRecords 是否为日志文件的分片
     private final boolean isSlice;
+
+    // 表示日志文件分片的起始位置和结束位置
     private final int start;
     private final int end;
 
     private final Iterable<FileLogInputStream.FileChannelRecordBatch> batches;
 
     // mutable state
+    // FileRecords 大小，单位是字节。如果FileRecords 是日志文件的分片，则表示分片大小。
+    // 如过不是分片，则表示整个日志文件的大小。
     private final AtomicInteger size;
+
+    // 用于读写对应的日志文件
     private final FileChannel channel;
+
+    // 指向磁盘上对应的日志文件
     private volatile File file;
 
     /**
@@ -84,6 +95,10 @@ public class FileRecords extends AbstractRecords implements Closeable {
             channel.position(limit);
         }
 
+        /**
+         * 在FileRecords对象初始化的过程中，会移动FileChannel 的position指针，这是为了实现
+         * 每次写入消息都在日志文件的尾部，从而避免重启服务后的写入操作覆盖之前的操作
+         */
         batches = batchesFrom(start);
     }
 
@@ -150,6 +165,7 @@ public class FileRecords extends AbstractRecords implements Closeable {
     }
 
     /**
+     * 该方法实现了写日志文件的功能
      * Append a set of records to the file. This method is not thread-safe and must be
      * protected with a lock.
      *
@@ -160,8 +176,9 @@ public class FileRecords extends AbstractRecords implements Closeable {
         if (records.sizeInBytes() > Integer.MAX_VALUE - size.get())
             throw new IllegalArgumentException("Append of size " + records.sizeInBytes() +
                     " bytes is too large for segment with current file position at " + size.get());
-
+        // 写文件
         int written = records.writeFullyTo(channel);
+        // 修改FileRecords的大小
         size.getAndAdd(written);
         return written;
     }
@@ -288,6 +305,12 @@ public class FileRecords extends AbstractRecords implements Closeable {
     }
 
     /**
+     *
+     * 查找指定消息:
+     *      从指定的 startingPosition 开始，逐条遍历 FileRecords 中的消息，并将每个消息的 offset 与 targetOffset 进行比较
+     *      直到 offset 大于等于 targetOffset，最后返回查找的 offset 。在整个遍历中，不会将消息的 key 和 value 读取到内存，
+     *      而是只读取 LogOverhead (即 offset 和 size )
+     *
      * Search forward for the file position of the last offset that is greater than or equal to the target offset
      * and return its physical position and the size of the message (including log overhead) at the returned offset. If
      * no such offsets are found, return null.
@@ -408,6 +431,7 @@ public class FileRecords extends AbstractRecords implements Closeable {
                                    int initFileSize,
                                    boolean preallocate) throws IOException {
         FileChannel channel = openChannel(file, mutable, fileAlreadyExists, initFileSize, preallocate);
+        // 如果使用 preallocate 进行预分配空间，end 会被初始化为0
         int end = (!fileAlreadyExists && preallocate) ? 0 : Integer.MAX_VALUE;
         return new FileRecords(file, channel, 0, end, false);
     }
@@ -443,15 +467,18 @@ public class FileRecords extends AbstractRecords implements Closeable {
                                            int initFileSize,
                                            boolean preallocate) throws IOException {
         if (mutable) {
+            // 根据 mutable 参数 创建的FileChannel 是否可写。
             if (fileAlreadyExists || !preallocate) {
                 return FileChannel.open(file.toPath(), StandardOpenOption.CREATE, StandardOpenOption.READ,
                         StandardOpenOption.WRITE);
             } else {
+                // 进行文件预分配
                 RandomAccessFile randomAccessFile = new RandomAccessFile(file, "rw");
                 randomAccessFile.setLength(initFileSize);
                 return randomAccessFile.getChannel();
             }
         } else {
+            // 创建只读的FileChannel
             return FileChannel.open(file.toPath());
         }
     }

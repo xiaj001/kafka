@@ -86,6 +86,7 @@ public class MemoryRecords extends AbstractRecords {
     public int writeFullyTo(GatheringByteChannel channel) throws IOException {
         buffer.mark();
         int written = 0;
+        // 将MemoryRecords中的数据全部写入文件
         while (written < sizeInBytes())
             written += channel.write(buffer);
         buffer.reset();
