@@ -44,9 +44,14 @@ import scala.collection.mutable.ArrayBuffer
  * size or I/O rate.
  *
  * A background thread handles log retention by periodically truncating excess log segments.
+  *
+  * 在一个Broker上的所有log都是由LogManager进行管理的。LogManager提供了加载Log，创建Log集合，
+  * 删除Log集合，查询Log集合等功能，并且启动了3个周期性的后台任务以及Cleaner线程(可能不止一
+  * 个线程)，分别是:log-flusher(日志刷写)任务、log-retention(日志保留)任务、
+  * recovery-point-checkpoint(检查点刷新)任务以及Cleaner线程(日志清理)
  */
 @threadsafe
-class LogManager(logDirs: Seq[File],
+class LogManager(logDirs: Seq[File],  // log目录集合，在server.properties 配置文件中通过 log.dir项指定的多个目录
                  initialOfflineDirs: Seq[File],
                  val topicConfigs: Map[String, LogConfig], // note that this doesn't get updated after creation
                  val initialDefaultConfig: LogConfig,
@@ -57,7 +62,7 @@ class LogManager(logDirs: Seq[File],
                  val flushStartOffsetCheckpointMs: Long,
                  val retentionCheckMs: Long,
                  val maxPidExpirationMs: Int,
-                 scheduler: Scheduler,
+                 scheduler: Scheduler,// Kafka Schedule对象，用于执行周期性任务的线程池
                  val brokerState: BrokerState,
                  brokerTopicStats: BrokerTopicStats,
                  logDirFailureChannel: LogDirFailureChannel,
@@ -94,7 +99,10 @@ class LogManager(logDirs: Seq[File],
       _liveLogDirs.asScala.toBuffer
   }
 
+  // FileLock集合。这些FileLock用来在文件系统层面为每个log目录加文件锁。
   private val dirLocks = lockLogDirs(liveLogDirs)
+
+  // Map<File,OffsetCheckPoint>类型，用于管理每个log目录与其下的RecoveryPointCheckpoint文件之间的映射关系
   @volatile private var recoveryPointCheckpoints = liveLogDirs.map(dir =>
     (dir, new OffsetCheckpointFile(new File(dir, RecoveryPointCheckpointFile), logDirFailureChannel))).toMap
   @volatile private var logStartOffsetCheckpoints = liveLogDirs.map(dir =>
@@ -390,18 +398,24 @@ class LogManager(logDirs: Seq[File],
   def startup() {
     /* Schedule the cleanup task to delete old logs */
     if (scheduler != null) {
+
+      // 启动log retention 任务
       info("Starting log cleanup with a period of %d ms.".format(retentionCheckMs))
       scheduler.schedule("kafka-log-retention",
                          cleanupLogs _,
                          delay = InitialTaskDelayMs,
                          period = retentionCheckMs,
                          TimeUnit.MILLISECONDS)
+
+      // 启动log flush 任务
       info("Starting log flusher with a default period of %d ms.".format(flushCheckMs))
       scheduler.schedule("kafka-log-flusher",
                          flushDirtyLogs _,
                          delay = InitialTaskDelayMs,
                          period = flushCheckMs,
                          TimeUnit.MILLISECONDS)
+
+      // 启动 recovery point checkpoint 任务
       scheduler.schedule("kafka-recovery-point-checkpoint",
                          checkpointLogRecoveryOffsets _,
                          delay = InitialTaskDelayMs,
@@ -567,6 +581,7 @@ class LogManager(logDirs: Seq[File],
   /**
    * Write out the current recovery point for all logs to a text file in the log directory
    * to avoid recovering the whole log on startup.
+    * 定时将每个Log的recoveryPoint写入RecoveryPointCheckPoint文件中
    */
   def checkpointLogRecoveryOffsets() {
     logsByDir.foreach { case (dir, partitionToLogMap) =>
@@ -888,6 +903,8 @@ class LogManager(logDirs: Seq[File],
   /**
    * Delete any eligible logs. Return the number of segments deleted.
    * Only consider logs that are not compacted.
+    * 按照两个条件进行LogSegment 的清理工作:一是 LogSegment 的存活时长，
+    * 二是 整个Log的大小
    */
   def cleanupLogs() {
     debug("Beginning log cleanup...")
@@ -959,6 +976,7 @@ class LogManager(logDirs: Seq[File],
 
   /**
    * Flush any log which has exceeded its flush interval and has unwritten messages.
+    * 根据配置的时长定期对Log进行flush操作，保证数据的持久性
    */
   private def flushDirtyLogs(): Unit = {
     debug("Checking for dirty logs to flush...")
