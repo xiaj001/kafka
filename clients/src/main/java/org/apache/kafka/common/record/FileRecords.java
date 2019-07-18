@@ -245,6 +245,9 @@ public class FileRecords extends AbstractRecords implements Closeable {
     }
 
     /**
+     *
+     * 负责将日志文件截断到 targetSize 大小。
+     * 在 Leader 副本切换时会用到
      * Truncate this file message set to the given size in bytes. Note that this API does no checking that the
      * given size falls on a valid message boundary.
      * In some versions of the JDK truncating to the same size as the file message set will cause an
@@ -256,13 +259,17 @@ public class FileRecords extends AbstractRecords implements Closeable {
      */
     public int truncateTo(int targetSize) throws IOException {
         int originalSize = sizeInBytes();
+        // 检测 targetSize 的有效性
         if (targetSize > originalSize || targetSize < 0)
             throw new KafkaException("Attempt to truncate log segment " + file + " to " + targetSize + " bytes failed, " +
                     " size of this log segment is " + originalSize + " bytes.");
         if (targetSize < (int) channel.size()) {
+            // 裁剪文件
             channel.truncate(targetSize);
+            // 修改size
             size.set(targetSize);
         }
+        // 返回裁剪的字节数
         return originalSize - targetSize;
     }
 
