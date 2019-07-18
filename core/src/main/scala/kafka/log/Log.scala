@@ -194,12 +194,17 @@ object RollParams {
  * @param time The time instance used for checking the clock
  * @param maxProducerIdExpirationMs The maximum amount of time to wait before a producer id is considered expired
  * @param producerIdExpirationCheckIntervalMs How often to check for producer ids which need to be expired
+  *
+  * Log是对多个LogSegment对象的顺序组合，形成一个逻辑的日志，为了实习快速定位LogSegment，
+  * Log使用跳表(SkipList)对LogSegment进行管理
  */
 @threadsafe
-class Log(@volatile var dir: File,
+class Log(@volatile var dir: File,// Log对应的磁盘目录，此目录下存放了每个LogSegment对应的日志文件和索引文件
           @volatile var config: LogConfig,
           @volatile var logStartOffset: Long,
-          @volatile var recoveryPoint: Long,
+          @volatile var recoveryPoint: Long,// 指定恢复操作的起始offset，recoverPoint之前
+                                            // 的message已经刷新到磁盘上持久存储，而其后的消息则不一定，
+                                            // 出现宕机时可能会丢失。所以只要恢复recoverPoint之后的消息即可
           scheduler: Scheduler,
           brokerTopicStats: BrokerTopicStats,
           val time: Time,
@@ -245,6 +250,7 @@ class Log(@volatile var dir: File,
       throw new KafkaStorageException(s"The memory mapped buffer for log of $topicPartition is already closed")
   }
 
+  // 主要用于产生分配给消息的offset，同时也是当前副本的LEO。
   @volatile private var nextOffsetMetadata: LogOffsetMetadata = _
 
   /* The earliest offset which is part of an incomplete transaction. This is used to compute the
@@ -268,6 +274,7 @@ class Log(@volatile var dir: File,
   @volatile private var replicaHighWatermark: Option[Long] = None
 
   /* the actual segments of the log */
+  // 使用跳表对LogSegment进行管理
   private val segments: ConcurrentNavigableMap[java.lang.Long, LogSegment] = new ConcurrentSkipListMap[java.lang.Long, LogSegment]
 
   @volatile private var _leaderEpochCache: LeaderEpochFileCache = initializeLeaderEpochCache()
@@ -791,6 +798,7 @@ class Log(@volatile var dir: File,
    */
   private def append(records: MemoryRecords, isFromClient: Boolean, assignOffsets: Boolean, leaderEpoch: Int): LogAppendInfo = {
     maybeHandleIOException(s"Error while appending records to $topicPartition in dir ${dir.getParent}") {
+      // 步骤1:检测消息长度和CRC32校验码，返回LogAppendInfo对象
       val appendInfo = analyzeAndValidateRecords(records, isFromClient = isFromClient)
 
       // return if we have no valid messages or if this is a duplicate of the last appended entry
@@ -798,17 +806,21 @@ class Log(@volatile var dir: File,
         return appendInfo
 
       // trim any invalid bytes or partial messages before appending it to the on-disk log
+      // 步骤2:将为通过analyzeAndValidateRecords()方法检查的部分截断
       var validRecords = trimInvalidBytes(records, appendInfo)
 
       // they are valid, insert them in the log
-      lock synchronized {
+      lock synchronized { // 加锁
         checkIfMemoryMappedBufferClosed()
-        if (assignOffsets) {
+        if (assignOffsets) { // 判断是否需要分配offset，默认是需要的。
           // assign offsets to the message set
+          // 获取 nextOffsetMetadata记录的messageOffset字段，从此值开始向后分配offset
           val offset = new LongRef(nextOffsetMetadata.messageOffset)
+          // 使用firstOffset字段记录第一条消息的offset，并不受压缩消息的影响
           appendInfo.firstOffset = Some(offset.value)
           val now = time.milliseconds
           val validateAndOffsetAssignResult = try {
+            // 步骤3:进一步验证，并分配offset。
             LogValidator.validateMessagesAndAssignOffsets(validRecords,
               offset,
               time,
@@ -828,13 +840,17 @@ class Log(@volatile var dir: File,
           validRecords = validateAndOffsetAssignResult.validatedRecords
           appendInfo.maxTimestamp = validateAndOffsetAssignResult.maxTimestamp
           appendInfo.offsetOfMaxTimestamp = validateAndOffsetAssignResult.shallowOffsetOfMaxTimestamp
+          // lastOffset记录最后一条消息的offset，并不受压缩消息的影响
           appendInfo.lastOffset = offset.value - 1
           appendInfo.recordConversionStats = validateAndOffsetAssignResult.recordConversionStats
           if (config.messageTimestampType == TimestampType.LOG_APPEND_TIME)
+            // 修改时间戳
             appendInfo.logAppendTime = now
 
           // re-validate message sizes if there's a possibility that they have changed (due to re-compression or message
           // format conversion)
+          // 步骤4:若在validateMessagesAndAssignOffsets()方法中修改了ByteBufferMessageSet的长度，
+          // 则需要重新检测消息长度
           if (validateAndOffsetAssignResult.messageSizeMaybeChanged) {
             for (batch <- validRecords.batches.asScala) {
               if (batch.sizeInBytes > config.maxMessageSize) {
@@ -896,6 +912,7 @@ class Log(@volatile var dir: File,
         }
 
         // maybe roll the log if this segment is full
+        // 步骤5:获取有效的segment
         val segment = maybeRoll(validRecords.sizeInBytes, appendInfo)
 
         val logOffsetMetadata = LogOffsetMetadata(
@@ -903,6 +920,7 @@ class Log(@volatile var dir: File,
           segmentBaseOffset = segment.baseOffset,
           relativePositionInSegment = segment.size)
 
+        // 步骤6:追加消息
         segment.append(largestOffset = appendInfo.lastOffset,
           largestTimestamp = appendInfo.maxTimestamp,
           shallowOffsetOfMaxTimestamp = appendInfo.offsetOfMaxTimestamp,
@@ -926,6 +944,7 @@ class Log(@volatile var dir: File,
         producerStateManager.updateMapEndOffset(appendInfo.lastOffset + 1)
 
         // increment the log end offset
+        // 步骤7:更新LEO
         updateLogEndOffset(appendInfo.lastOffset + 1)
 
         // update the first unstable offset (which is used to compute LSO)
@@ -936,6 +955,7 @@ class Log(@volatile var dir: File,
           s"next offset: ${nextOffsetMetadata.messageOffset}, " +
           s"and messages: $validRecords")
 
+        // 步骤8: 检测未刷新到磁盘的数据是否达到一定阈值，如果是则调用flush()方法刷新
         if (unflushedMessages >= config.flushInterval)
           flush()
 
