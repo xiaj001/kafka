@@ -47,10 +47,26 @@ import org.apache.kafka.common.errors.InvalidOffsetException
  *
  * All external APIs translate from relative offsets to full offsets, so users of this class do not interact with the internal
  * storage format.
+  *
+  *
+  * 为了提高查找消息的性能，为每个日志文件 添加了 对应的索引文件。 OffsetIndex对象 对应 管理磁盘上的一个索引文件
+  * 索引文件中 索引项的格式: 每个索引项为8字节，分为两部分，第一部分是相对offset，占4个字节，第二部分是物理地址，
+  * 也就是索引消息在日志文件中对应的position位置，占4个字节。这样就实现了 offset 与物理地址之间的映射。
+  * 相对offset 表示的是消息相对于 baseOffset的偏移量。
+  *   例如: 分段后的一个日志文件的baseOffset是20，当然它的文件名就是 20.log ，那么offset为23的Message在索引文件
+  *   中的相对offset就是 23-20 =3 。 消息的 offset 是Long类型，4个字节可能无法直接存储消息的offset，所以使用相对offset
+  *   这样可以减小索引文件占用的空间。
+  *
+  *   kafka使用稀疏索引的方式构造消息的索引。
+  *   不断减小索引文件大小的目的是为了将索引文件映射到内存，在OffsetIndex中会使用MappedByteBuffer将索引文件映射到内存
+  *
  */
 // Avoid shadowing mutable `file` in AbstractIndex
 class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writable: Boolean = true)
     extends AbstractIndex[Long, Int](_file, baseOffset, maxIndexSize, writable) {
+
+  // _file : 指向磁盘上的索引文件
+  // baseOffset : 对应日志文件中第一个消息的offset
 
   override def entrySize = 8
 
@@ -72,6 +88,7 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
     }
   }
 
+  //保存最后一个索引项的 offset
   def lastOffset: Long = _lastOffset
 
   /**
@@ -82,14 +99,20 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
    * @return The offset found and the corresponding file position for this offset
    *         If the target offset is smaller than the least entry in the index (or the index is empty),
    *         the pair (baseOffset, 0) is returned.
+    *
+    *         二分查找
    */
   def lookup(targetOffset: Long): OffsetPosition = {
+    // Windows操作系统需要加锁，其它操作系统不需要加锁
     maybeLock(lock) {
+      // 创建一个副本
       val idx = mmap.duplicate
+      // 二分查找的具体实现
       val slot = largestLowerBoundSlotFor(idx, targetOffset, IndexSearchType.KEY)
       if(slot == -1)
         OffsetPosition(baseOffset, 0)
       else
+      //将 offset 和 物理地址(position) 封装成 OffsetPosition 对象并返回
         parseEntry(idx, slot).asInstanceOf[OffsetPosition]
     }
   }
@@ -115,6 +138,9 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
   private def physical(buffer: ByteBuffer, n: Int): Int = buffer.getInt(n * entrySize + 4)
 
   override def parseEntry(buffer: ByteBuffer, n: Int): IndexEntry = {
+
+      // relativeOffset() 和 physical() 方法是获取索引项内容的辅助方法，分别实现了读取索引项中
+    // 的相对 offset 和 索引项中的物理地址(position)的功能
       OffsetPosition(baseOffset + relativeOffset(buffer, n), physical(buffer, n))
   }
 
@@ -133,6 +159,7 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
   }
 
   /**
+    * 向索引文件中添加索引项
    * Append an entry for the given offset/location pair to the index. This entry must have a larger offset than all subsequent entries.
    * @throws IndexOffsetOverflowException if the offset causes index offset to overflow
    */

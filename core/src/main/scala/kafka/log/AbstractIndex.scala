@@ -105,21 +105,27 @@ abstract class AbstractIndex[K, V](@volatile var file: File, val baseOffset: Lon
  */
   protected def _warmEntries: Int = 8192 / entrySize
 
+  // 在对 mmap 操作时，需要加锁保护
   protected val lock = new ReentrantLock
 
+  // 用来操作索引文件的 MappedByteBuffer
   @volatile
   protected var mmap: MappedByteBuffer = {
+    // 如果索引文件不存在，则创建新的文件并返回true，反之返回false
     val newlyCreated = file.createNewFile()
     val raf = if (writable) new RandomAccessFile(file, "rw") else new RandomAccessFile(file, "r")
     try {
       /* pre-allocate the file if necessary */
+      // 对于新创建的索引文件进行扩容
       if(newlyCreated) {
         if(maxIndexSize < entrySize)
           throw new IllegalArgumentException("Invalid max index size: " + maxIndexSize)
+        // 根据maxIndexSize的值对索引文件扩容，扩容结果是小于maxIndexSize的最大的8倍数
         raf.setLength(roundDownToExactMultiple(maxIndexSize, entrySize))
       }
 
       /* memory-map the file */
+      // 进行内存映射
       _length = raf.length()
       val idx = {
         if (writable)
@@ -129,9 +135,11 @@ abstract class AbstractIndex[K, V](@volatile var file: File, val baseOffset: Lon
       }
       /* set the position in the index for the next entry */
       if(newlyCreated)
+        // 将新创建的索引文件的position设置为0，从头开始写文件
         idx.position(0)
       else
         // if this is a pre-existing index, assume it is valid and set position to last entry
+      // 对于原来就存在的索引文件，则将position移动到所有索引项的结束位置，防止数据覆盖
         idx.position(roundDownToExactMultiple(idx.limit(), entrySize))
       idx
     } finally {
@@ -145,7 +153,9 @@ abstract class AbstractIndex[K, V](@volatile var file: File, val baseOffset: Lon
   @volatile
   private[this] var _maxEntries = mmap.limit() / entrySize
 
-  /** The number of entries in this index */
+  /** The number of entries in this index
+    * 当前索引文件中的索引项个数
+    * */
   @volatile
   protected var _entries = mmap.position() / entrySize
 
@@ -154,6 +164,7 @@ abstract class AbstractIndex[K, V](@volatile var file: File, val baseOffset: Lon
    */
   def isFull: Boolean = _entries >= _maxEntries
 
+  // 当前索引文件中最多能保存的索引项的个数
   def maxEntries: Int = _maxEntries
 
   def entries: Int = _entries
