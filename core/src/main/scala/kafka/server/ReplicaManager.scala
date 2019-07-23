@@ -68,6 +68,9 @@ case class LogDeleteRecordsResult(requestedOffset: Long, lowWatermark: Long, exc
 }
 
 /*
+ * 在一个Broker上可能分布着多个Partition副本信息，ReplicaManager的主要功能是
+ * 管理一个Broker范围内的Partition信息。其实现 依赖日志存储子系统、Delay组件、
+ * KafkaSchedule等，底层依赖于Partition和Replica
  * Result metadata of a log read operation on the log
  * @param info @FetchDataInfo returned by the @Log read
  * @param hw high watermark of the local replica
@@ -136,15 +139,16 @@ class ReplicaManager(val config: KafkaConfig,
                      metrics: Metrics,
                      time: Time,
                      val zkClient: KafkaZkClient,
-                     scheduler: Scheduler,
-                     val logManager: LogManager,
+                     scheduler: Scheduler,           // 用于执行 ReplicaManager 中的周期性定时任务,主要有三个定时任务:
+                                                    //  highwatermark-checkpoint任务，isr-expiration任务，isr-change-propagation任务
+                     val logManager: LogManager,    // 对分区的读写操作都委托给底层的日志存储系统
                      val isShuttingDown: AtomicBoolean,
                      quotaManagers: QuotaManagers,
                      val brokerTopicStats: BrokerTopicStats,
                      val metadataCache: MetadataCache,
                      logDirFailureChannel: LogDirFailureChannel,
-                     val delayedProducePurgatory: DelayedOperationPurgatory[DelayedProduce],
-                     val delayedFetchPurgatory: DelayedOperationPurgatory[DelayedFetch],
+                     val delayedProducePurgatory: DelayedOperationPurgatory[DelayedProduce],  // 用于管理DelayedProduce对象
+                     val delayedFetchPurgatory: DelayedOperationPurgatory[DelayedFetch],  // 用于管理 DelayedFetch对象
                      val delayedDeleteRecordsPurgatory: DelayedOperationPurgatory[DelayedDeleteRecords],
                      threadNamePrefix: Option[String]) extends Logging with KafkaMetricsGroup {
 
@@ -175,14 +179,27 @@ class ReplicaManager(val config: KafkaConfig,
   }
 
   /* epoch of the controller that last changed the leader */
+  //  记录KafkaController 的年代信息，当重新选举Controller Leader时，该字段会递增。
+  // 之后，在ReplicaManager处理来自KafkaController 的请求时，会先检测请求中携带的
+  // 年代信息是否等于controllerEpoch字段，这就避免接收旧Controller Leader 发送的请求。
   @volatile var controllerEpoch: Int = KafkaController.InitialControllerEpoch
+
+  // 当前Broker的id，主要用于查找Local Replica
   private val localBrokerId = config.brokerId
+
+  //  其中保存了 当前Broker上分配的所有Partition信息。当从Pool查找不到指定key时，则使用 valueFactory创建
+  // 一个默认的value值放入Pool并返回。
   private val allPartitions = new Pool[TopicPartition, Partition](valueFactory = Some(tp =>
     Partition(tp, time, this)))
   private val replicaStateChangeLock = new Object
+
+  //  在 ReplicaFetcherManager 中管理了多个 ReplicaFetcherThread 线程，ReplicaFetcherThread 线程会向Leader副本发
+  // 送FetchRequest请求来获取消息，实现 Follower副本与 Leader副本同步。
   val replicaFetcherManager = createReplicaFetcherManager(metrics, time, threadNamePrefix, quotaManagers.follower)
   val replicaAlterLogDirsManager = createReplicaAlterLogDirsManager(quotaManagers.alterLogDirs, brokerTopicStats)
   private val highWatermarkCheckPointThreadStarted = new AtomicBoolean(false)
+
+  //  用于缓存每个log目录与offsetCheckpoint之间的对应关系，OffsetCheckpoint记录了对应log目录下的replication-offset-checkpoint文件
   @volatile var highWatermarkCheckpoints = logManager.liveLogDirs.map(dir =>
     (dir.getAbsolutePath, new OffsetCheckpointFile(new File(dir, ReplicaManager.HighWatermarkFilename), logDirFailureChannel))).toMap
 
@@ -190,6 +207,7 @@ class ReplicaManager(val config: KafkaConfig,
   this.logIdent = s"[ReplicaManager broker=$localBrokerId] "
   private val stateChangeLogger = new StateChangeLogger(localBrokerId, inControllerContext = false, None)
 
+  //  用于记录isr集合发生变化的分区信息
   private val isrChangeSet: mutable.Set[TopicPartition] = new mutable.HashSet[TopicPartition]()
   private val lastIsrChangeMs = new AtomicLong(System.currentTimeMillis())
   private val lastIsrPropagationMs = new AtomicLong(System.currentTimeMillis())
@@ -715,6 +733,7 @@ class ReplicaManager(val config: KafkaConfig,
 
   /**
    * Append the messages to the local replica logs
+    * 将消息追加到本地日志
    */
   private def appendToLocalLog(internalTopicsAllowed: Boolean,
                                isFromClient: Boolean,
@@ -726,6 +745,7 @@ class ReplicaManager(val config: KafkaConfig,
       brokerTopicStats.allTopicsStats.totalProduceRequestRate.mark()
 
       // reject appending to internal topics if it is not allowed
+      // 先检测要写入的Topic是否是Kafka内部的topic
       if (Topic.isInternal(topicPartition.topic) && !internalTopicsAllowed) {
         (topicPartition, LogAppendResult(
           LogAppendInfo.UnknownLogAppendInfo,
@@ -1005,6 +1025,13 @@ class ReplicaManager(val config: KafkaConfig,
     }
   }
 
+  /**
+    * 成为 Leader 或 Follower
+    * @param correlationId
+    * @param leaderAndIsrRequest
+    * @param onLeadershipChange
+    * @return
+    */
   def becomeLeaderOrFollower(correlationId: Int,
                              leaderAndIsrRequest: LeaderAndIsrRequest,
                              onLeadershipChange: (Iterable[Partition], Iterable[Partition]) => Unit): LeaderAndIsrResponse = {
