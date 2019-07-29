@@ -84,6 +84,9 @@ class KafkaController(val config: KafkaConfig, zkClient: KafkaZkClient, time: Ti
   val partitionStateMachine = new PartitionStateMachine(config, stateChangeLogger, controllerContext, zkClient, mutable.Map.empty, new ControllerBrokerRequestBatch(this, stateChangeLogger))
   partitionStateMachine.setTopicDeletionManager(topicDeletionManager)
 
+  /**
+    * 以下 Handler 是zookeeper 节点监听回调的实现
+    */
   private val controllerChangeHandler = new ControllerChangeHandler(this, eventManager)
   private val brokerChangeHandler = new BrokerChangeHandler(this, eventManager)
   private val brokerModificationsHandlers: mutable.Map[Int, BrokerModificationsHandler] = mutable.Map.empty
@@ -159,6 +162,7 @@ class KafkaController(val config: KafkaConfig, zkClient: KafkaZkClient, time: Ti
    * elector
    */
   def startup() = {
+    // 注册状态变化监听器
     zkClient.registerStateChangeHandler(new StateChangeHandler {
       override val name: String = StateChangeHandlers.ControllerHandler
       override def afterInitializingSession(): Unit = {
@@ -174,6 +178,7 @@ class KafkaController(val config: KafkaConfig, zkClient: KafkaZkClient, time: Ti
       }
     })
     eventManager.put(Startup)
+    // 启动 ControllerEventThread 线程 ,执行 Startup.process()方法
     eventManager.start()
   }
 
@@ -232,6 +237,7 @@ class KafkaController(val config: KafkaConfig, zkClient: KafkaZkClient, time: Ti
     info("Registering handlers")
 
     // before reading source of truth from zookeeper, register the listeners to get broker/topic callbacks
+    // 注册 child改变 和 Node改变的回调方法
     val childChangeHandlers = Seq(brokerChangeHandler, topicChangeHandler, topicDeletionHandler, logDirEventNotificationHandler,
       isrChangeNotificationHandler)
     childChangeHandlers.foreach(zkClient.registerZNodeChildChangeHandler)
@@ -1133,7 +1139,9 @@ class KafkaController(val config: KafkaConfig, zkClient: KafkaZkClient, time: Ti
     def state = ControllerState.ControllerChange
 
     override def process(): Unit = {
+      //  注册ZNode节点 并且 检测是否存在
       zkClient.registerZNodeChangeHandlerAndCheckExistence(controllerChangeHandler)
+      // 选举
       elect()
     }
 
@@ -1201,11 +1209,13 @@ class KafkaController(val config: KafkaConfig, zkClient: KafkaZkClient, time: Ti
   }
 
   private def elect(): Unit = {
+    // 到zk上获取  controller 节点的数据，如果没获取到返回 -1
     activeControllerId = zkClient.getControllerId.getOrElse(-1)
     /*
      * We can get here during the initial startup and the handleDeleted ZK callback. Because of the potential race condition,
      * it's possible that the controller has already been elected when we get here. This check will prevent the following
      * createEphemeralPath method from getting into an infinite loop if this broker is already the controller.
+     * 如果获取到controller 节点，直接返回
      */
     if (activeControllerId != -1) {
       debug(s"Broker $activeControllerId has been elected as the controller, so stopping the election process.")
@@ -1213,14 +1223,16 @@ class KafkaController(val config: KafkaConfig, zkClient: KafkaZkClient, time: Ti
     }
 
     try {
+      // 注册Controller并且增加controller的年代信息
       val (epoch, epochZkVersion) = zkClient.registerControllerAndIncrementControllerEpoch(config.brokerId)
-      controllerContext.epoch = epoch
-      controllerContext.epochZkVersion = epochZkVersion
-      activeControllerId = config.brokerId
+      controllerContext.epoch = epoch //  年代信息
+      controllerContext.epochZkVersion = epochZkVersion //  zk节点版本
+      activeControllerId = config.brokerId  // 当前brokerId
 
       info(s"${config.brokerId} successfully elected as the controller. Epoch incremented to ${controllerContext.epoch} " +
         s"and epoch zk version is now ${controllerContext.epochZkVersion}")
 
+      // Broker故障转移 (监听zookeeper节点信息的变化)
       onControllerFailover()
     } catch {
       case e: ControllerMovedException =>

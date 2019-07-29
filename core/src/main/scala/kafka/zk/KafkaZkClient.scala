@@ -105,6 +105,7 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
 
     // Read /controller_epoch to get the current controller epoch and zkVersion,
     // create /controller_epoch with initial value if not exists
+    // 到 zk 节点上获取当前 /controller_epoch 节点的值(年代信息)
     val (curEpoch, curEpochZkVersion) = getControllerEpoch
       .map(e => (e._1, e._2.getVersion))
       .getOrElse(maybeCreateControllerEpochZNode())
@@ -119,6 +120,7 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
       val curControllerId = getControllerId.getOrElse(throw new ControllerMovedException(
         s"The ephemeral node at ${ControllerZNode.path} went away while checking whether the controller election succeeds. " +
           s"Aborting controller startup procedure"))
+      //  如果 controllerId 是当前Controller的id
       if (controllerId == curControllerId) {
         val (epoch, stat)  = getControllerEpoch.getOrElse(
           throw new IllegalStateException(s"${ControllerEpochZNode.path} existed before but goes away while trying to read it"))
@@ -996,6 +998,7 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
   }
 
   /**
+    * 获取当前controller的brokerid
    * Gets the controller id.
    * @return optional integer that is Some if the controller znode exists and can be parsed and None otherwise.
    */
